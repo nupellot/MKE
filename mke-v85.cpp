@@ -50,7 +50,7 @@ int main(int argc, char **argv) {
     // Данные по варианту задачи
     const double a = 7, b = 0, c = -15, d = 60;
     // restriction lower = {second, -7, 5.85}, upper = {second, 4, 4};
-    restriction lower = {first, -7, 0}, upper = {second, 4, 4};
+    restriction lower = {first, -7, 0}, upper = {second, 4, 4}, middle = {first, 0, 6};
 
     // Вычисление необходимых постоянных
     const int size = settings.elemAmount * settings.type + 1; // Размер матрицы и векторов
@@ -77,6 +77,7 @@ int main(int argc, char **argv) {
     
     // Применяем граничные условия
     restrict[lower.grade](stiffnessMatrix, loadVector, a, size, 0, lower.val);
+    restrict[middle.grade](stiffnessMatrix, loadVector, a, size, 0.64 * size, middle.val);  // Доп. Задание: ограничение первого рода в точке 0
     restrict[upper.grade](stiffnessMatrix, loadVector, a, size, size - 1, upper.val);
 
     // Решаем систему линейных алгебраических уравнений методом Гаусса
@@ -195,9 +196,9 @@ int makeCubicSLAU(vector<double> &resultMatrix,
 int restrictType1(vector<double> &matrix, vector<double> &vector,
                                     int a, int len, int line, double value) {
     // Обнуляем соответствующую строку матрицы жесткости
-    for (auto iter{matrix.begin() + len * line};
-             iter != matrix.begin() + len * (line + 1); iter++)
+    for (auto iter{matrix.begin() + len * line}; iter != matrix.begin() + len * (line + 1); iter++) {
         *iter = 0;
+    }
     // Устанавливаем диагональный элемент матрицы равным 1
     matrix[len * line + line] = 1;
     // Устанавливаем значение вектора нагрузок
@@ -206,8 +207,7 @@ int restrictType1(vector<double> &matrix, vector<double> &vector,
 }
 
 // Ограничение второго рода (задание производной функции в узле)
-int restrictType2(vector<double> &matrix, vector<double> &vector,
-                                    int a, int len, int line, double value) {
+int restrictType2(vector<double> &matrix, vector<double> &vector, int a, int len, int line, double value) {
     // Модифицируем вектор нагрузок в зависимости от положения узла
     vector[line] += a * (line ? -value : value);
     return 0;
