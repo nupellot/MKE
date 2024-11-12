@@ -36,6 +36,91 @@ int restrictType1(vector<double> &matrix, vector<double> &vector, int a, int len
 int makeLinearSLAU(vector<double> &resultMatrix, vector<double> &resultVector, int size, double L, double a, double b, double c, double d);
 int makeCubicSLAU(vector<double> &resultMatrix, vector<double> &resultVector, int size, double L, double a, double b, double c, double d);
 
+double realSolvePrime(double x) {
+    double C2 = -0.000141861924;
+    double C1 = 0.007826998720;
+    double sqrtVal = sqrt(15.0 / 7.0);
+    return C1 * sqrtVal * exp(sqrtVal * x) - C2 * sqrtVal * exp(-sqrtVal * x);
+}
+#include <fstream>
+#include <iomanip>
+#include <vector>
+#include <string>
+
+using namespace std;
+
+void exportStiffnessMatrixAndLoadVector(const vector<double>& stiffnessMatrix, 
+                                        const vector<double>& loadVector, 
+                                        int size, 
+                                        const string& matrixFilename = "stiffness_matrix.txt", 
+                                        const string& vectorFilename = "load_vector.txt") {
+    // Открываем файл для матрицы жесткости
+    ofstream matrixFile(matrixFilename);
+    if (matrixFile.is_open()) {
+        matrixFile << "Stiffness Matrix:\n";
+        matrixFile << setprecision(4) << fixed;  // Устанавливаем формат вывода для чисел
+        for (int i = 0; i < size; ++i) {
+            for (int j = 0; j < size; ++j) {
+                matrixFile << setw(10) << stiffnessMatrix[i * size + j] << " ";
+            }
+            matrixFile << "\n";
+        }
+        matrixFile.close();
+        cout << "Stiffness matrix exported to " << matrixFilename << endl;
+    } else {
+        cerr << "Unable to open file for stiffness matrix export." << endl;
+    }
+
+    // Открываем файл для вектора нагрузок
+    ofstream vectorFile(vectorFilename);
+    if (vectorFile.is_open()) {
+        vectorFile << "Load Vector:\n";
+        vectorFile << setprecision(4) << fixed;  // Устанавливаем формат вывода для чисел
+        for (int i = 0; i < size; ++i) {
+            vectorFile << "Node " << setw(3) << i << ": " << setw(10) << loadVector[i] << "\n";
+        }
+        vectorFile.close();
+        cout << "Load vector exported to " << vectorFilename << endl;
+    } else {
+        cerr << "Unable to open file for load vector export." << endl;
+    }
+}
+
+// addBoundaryConditionWithoutPrecomputedDerivative(stiffnessMatrix, loadVector, size, step, 0);
+void addBoundaryConditionWithoutPrecomputedDerivative(vector<double>& matrix, vector<double>& loadVector, int& size, double step, int boundaryIndex) {
+    // Увеличиваем размерность системы для включения производной как переменной
+    int newSize = size + 1;
+    vector<double> newMatrix(newSize * newSize, 0.0); // Создаем увеличенную матрицу жесткости
+    vector<double> newLoadVector(newSize, 0.0);       // Создаем увеличенный вектор нагрузок
+
+    // Копируем старую матрицу жесткости в увеличенную
+    for (int i = 0; i < size; ++i) {
+        for (int j = 0; j < size; ++j) {
+            newMatrix[i * newSize + j] = matrix[i * size + j];
+        }
+        newLoadVector[i] = loadVector[i]; // Копируем вектор нагрузок
+    }
+
+    // Добавляем новое уравнение для граничного условия второго рода
+    // Связываем новую переменную (производную) с граничным узлом и следующим узлом
+    newMatrix[boundaryIndex * newSize + newSize - 1] = -1.0;        // Влияние производной на граничный узел
+    newMatrix[(newSize - 1) * newSize + boundaryIndex] = -1.0;      // Симметричный элемент
+    newMatrix[(newSize - 1) * newSize + boundaryIndex + 1] = 1.0;   // Связь с соседним узлом
+    newMatrix[(newSize - 1) * newSize + newSize - 1] = -step;       // Учет конечной разности (производная)
+
+    // Вектор нагрузки для нового уравнения ставим в ноль (нулевой поток на границе)
+    newLoadVector[newSize - 1] = 0.0;
+
+    // Обновляем исходные matrix и loadVector, заменяя их увеличенными версиями
+    matrix = move(newMatrix);
+    loadVector = move(newLoadVector);
+    size = newSize;
+
+    cout << "Boundary condition added without precomputed derivative at index " << newSize - 1 << endl;
+}
+
+
+
 // Массив указателей на функции для применения граничных условий
 int (*restrict[2]) (vector<double> &matrix, vector<double> &vector,
      int a, int len, int line,
@@ -49,11 +134,14 @@ int main(int argc, char **argv) {
 
     // Данные по варианту задачи
     const double a = 7, b = 0, c = -15, d = 60;
-    // restriction lower = {second, -7, 5.85}, upper = {second, 4, 4};
-    restriction lower = {first, -7, 0}, upper = {second, 4, 4}, middle = {first, 0, 6};
+    restriction lower = {first, -7, 0}, upper = {second, 4, 4};
+    // lower = {second, -7, realSolvePrime(-7)};
+    cout << "Аналитическая производная в точке -7 = " << realSolvePrime(-7) << endl;
+    // restriction lower = {second, -7, 0}, upper = {second, 4, 4};
+
 
     // Вычисление необходимых постоянных
-    const int size = settings.elemAmount * settings.type + 1; // Размер матрицы и векторов
+    int size = settings.elemAmount * settings.type + 1; // Размер матрицы и векторов
     const double step = (upper.pos - lower.pos) / settings.elemAmount; // Шаг сетки
 
     // Используемые структуры данных
@@ -77,8 +165,10 @@ int main(int argc, char **argv) {
     
     // Применяем граничные условия
     restrict[lower.grade](stiffnessMatrix, loadVector, a, size, 0, lower.val);
-    restrict[middle.grade](stiffnessMatrix, loadVector, a, size, 0.64 * size, middle.val);  // Доп. Задание: ограничение первого рода в точке 0
-    restrict[upper.grade](stiffnessMatrix, loadVector, a, size, size - 1, upper.val);
+    // restrict[lower.grade](stiffnessMatrix, loadVector, a, size, 0, lower.val);
+    addBoundaryConditionWithoutPrecomputedDerivative(stiffnessMatrix, loadVector, size, step, 0);
+    // restrict[middle.grade](stiffnessMatrix, loadVector, a, size, 0.635 * size, middle.val);  // Доп. Задание: ограничение первого рода в точке 0
+    // restrict[upper.grade](stiffnessMatrix, loadVector, a, size, size - 1, upper.val);
 
     // Решаем систему линейных алгебраических уравнений методом Гаусса
     solveSLAU(displacements, stiffnessMatrix, loadVector, size);
@@ -120,6 +210,7 @@ int main(int argc, char **argv) {
                     vector<double> errors
             );
     export_data(size, settings, plotMKE, plotReal, plotAbsolutelyReal, displacements, errors);
+    exportStiffnessMatrixAndLoadVector(stiffnessMatrix, loadVector, size);
 
     return 0;
 }
