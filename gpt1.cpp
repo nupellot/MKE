@@ -86,131 +86,83 @@ void exportStiffnessMatrixAndLoadVector(const vector<double>& stiffnessMatrix,
     }
 }
 
-// addBoundaryConditionWithoutPrecomputedDerivative(stiffnessMatrix, loadVector, size, step, 0);
-void addBoundaryConditionWithoutPrecomputedDerivative(vector<double>& matrix, vector<double>& loadVector, int& size, double step, int boundaryIndex) {
-    // Увеличиваем размерность системы для включения производной как переменной
-    int newSize = size + 1;
-    vector<double> newMatrix(newSize * newSize, 0.0); // Создаем увеличенную матрицу жесткости
-    vector<double> newLoadVector(newSize, 0.0);       // Создаем увеличенный вектор нагрузок
-
-    // Копируем старую матрицу жесткости в увеличенную
-    for (int i = 0; i < size; ++i) {
-        for (int j = 0; j < size; ++j) {
-            newMatrix[i * newSize + j] = matrix[i * size + j];
-        }
-        newLoadVector[i] = loadVector[i]; // Копируем вектор нагрузок
-    }
-
-    // Добавляем новое уравнение для граничного условия второго рода
-    // Связываем новую переменную (производную) с граничным узлом и следующим узлом
-    newMatrix[boundaryIndex * newSize + newSize - 1] = -1.0;        // Влияние производной на граничный узел
-    newMatrix[(newSize - 1) * newSize + boundaryIndex] = -1.0;      // Симметричный элемент
-    newMatrix[(newSize - 1) * newSize + boundaryIndex + 1] = 1.0;   // Связь с соседним узлом
-    newMatrix[(newSize - 1) * newSize + newSize - 1] = -step;       // Учет конечной разности (производная)
-
-    // Вектор нагрузки для нового уравнения ставим в ноль (нулевой поток на границе)
-    newLoadVector[newSize - 1] = 0.0;
-
-    // Обновляем исходные matrix и loadVector, заменяя их увеличенными версиями
-    matrix = move(newMatrix);
-    loadVector = move(newLoadVector);
-    size = newSize;
-
-    cout << "Boundary condition added without precomputed derivative at index " << newSize - 1 << endl;
-}
-
-
 
 // Массив указателей на функции для применения граничных условий
 int (*restrict[2]) (vector<double> &matrix, vector<double> &vector,
      int a, int len, int line,
      double value) = {restrictType1, restrictType2};
 
+// Новая функция для расширенной СЛАУ
+int solveExtendedSLAU(vector<double> &retXVector, vector<double> &retDerivatives,
+                      vector<double> inAMatrix, vector<double> inBVector, int size) {
+    // Прямой ход метода Гаусса
+    for (int i = 0; i < size - 1; i++) {
+        for (int j = i + 1; j < size; j++) {
+            double d = inAMatrix[j * size + i] / inAMatrix[i * size + i];
+            for (int k = i; k < size; k++)
+                inAMatrix[j * size + k] -= d * inAMatrix[i * size + k];
+            inBVector[j] -= d * inBVector[i];
+        }
+    }
+
+    // Обратный ход метода Гаусса для определения производных
+    for (int i = size - 1; i >= 0; --i) {
+        double rSum = 0;
+        for (int j = i + 1; j < size; ++j)
+            rSum += retXVector[j] * inAMatrix[i * size + j];
+        retXVector[i] = (inBVector[i] - rSum) / inAMatrix[i * size + i];
+    }
+
+    // Сохранение производной в конце для повторного использования
+    retDerivatives[0] = retXVector[0];  // производная слева
+    retDerivatives[1] = retXVector[size - 1];  // производная справа (для граничного условия)
+
+    return 0;
+}
+
+// Основная функция программы
 int main(int argc, char **argv) {
-    // Обработка опций программы
-    const options_struct settings = getOptions(argc, argv);
-    if (settings.help)
-        return 0;
+    // Получаем настройки из командной строки
+    options_struct settings = getOptions(argc, argv);
 
-    // Данные по варианту задачи
+    // Данные для задачи
     const double a = 7, b = 0, c = -15, d = 60;
-    restriction lower = {first, -7, 0}, upper = {second, 4, 4};
-    // lower = {second, -7, realSolvePrime(-7)};
-    cout << "Аналитическая производная в точке -7 = " << realSolvePrime(-7) << endl;
-    // restriction lower = {second, -7, 0}, upper = {second, 4, 4};
+    restriction lower = {second, -7, 0};  // Изменили условие на второй род
+    restriction upper = {second, 4, 4};
 
+    // Размеры и шаг
+    int size = settings.elemAmount * settings.type + 1;
+    double step = (upper.pos - lower.pos) / settings.elemAmount;
 
-    // Вычисление необходимых постоянных
-    int size = settings.elemAmount * settings.type + 1; // Размер матрицы и векторов
-    const double step = (upper.pos - lower.pos) / settings.elemAmount; // Шаг сетки
+    // Векторы для СЛАУ
+    vector<double> stiffnessMatrix(size * size, 0);
+    vector<double> loadVector(size, 0);
+    vector<double> displacements(size, 0);
+    vector<double> derivatives(2, 0);  // Вектор для хранения производных на концах
 
-    // Используемые структуры данных
-    vector<double> stiffnessMatrix(size * size, 0); // Матрица жесткости
-    vector<double> loadVector(size, 0);             // Вектор нагрузок
-    vector<double> displacements(size, 0);          // Вектор смещений (решение)
-    vector<double> errors;                           // Вектор погрешностей
-    vector<pair<double, double>> plotMKE;            // Данные для графика МКЭ
-    vector<pair<double, double>> plotReal;           // Данные для графика точного решения
-    vector<pair<double, double>> plotAbsolutelyReal;           // Данные для графика точного решения
-    
-    // Заполняем матрицу жесткости и вектор нагрузок в зависимости от типа элементов
+    // Заполнение матрицы жесткости и вектора нагрузок
     if (settings.type == linear)
         makeLinearSLAU(stiffnessMatrix, loadVector, size, step, a, b, c, d);
     else if (settings.type == cubic)
         makeCubicSLAU(stiffnessMatrix, loadVector, size, step, a, b, c, d);
-    else {
-        cout << "Произошла ошибка: тип уравнения не задан." << endl;
-        return -1;
-    }
-    
-    // Применяем граничные условия
-    restrict[lower.grade](stiffnessMatrix, loadVector, a, size, 0, lower.val);
-    // restrict[lower.grade](stiffnessMatrix, loadVector, a, size, 0, lower.val);
-    // addBoundaryConditionWithoutPrecomputedDerivative(stiffnessMatrix, loadVector, size, step, 0);
-    // restrict[middle.grade](stiffnessMatrix, loadVector, a, size, 0.635 * size, middle.val);  // Доп. Задание: ограничение первого рода в точке 0
-    restrict[upper.grade](stiffnessMatrix, loadVector, a, size, size - 1, upper.val);
 
-    // Решаем систему линейных алгебраических уравнений методом Гаусса
+    // Первый этап: решение расширенной СЛАУ
+    solveExtendedSLAU(displacements, derivatives, stiffnessMatrix, loadVector, size);
+
+    // Второй этап: подстановка вычисленного значения производной слева и повторное решение
+    lower.val = derivatives[0];
+    restrictType2(stiffnessMatrix, loadVector, a, size, 0, lower.val);
+    restrictType2(stiffnessMatrix, loadVector, a, size, size - 1, upper.val);
+
     solveSLAU(displacements, stiffnessMatrix, loadVector, size);
 
-    // Вычисляем погрешности и заполняем массивы для вывода графиков
-    double maxError = 0;
-    double node = lower.pos;
-    for (int i = 0; i < size; i++) {
-        double realU = realSolve(node); // Точное решение в узле
-        double error = fabs(displacements[i] - realU); // Погрешность
-        if (error > maxError)
-            maxError = error;
-        errors.push_back(error);
-
-        plotMKE.push_back(make_pair(node, displacements[i])); // Данные МКЭ
-        plotReal.push_back(make_pair(node, realU));           // Данные точного решения
-
-        // cout << "u(" << node << ") = " << displacements[i] << endl;
-        node += step / settings.type; // Переход к следующему узлу
+    // Вывод и завершение
+    cout << "Производная слева: " << derivatives[0] << endl;
+    cout << "Решение для перемещений: ";
+    for (double u : displacements) {
+        cout << u << " ";
     }
-    double x = lower.pos;   // Для дебага: рисую настоящий график решения.
-    while (x < upper.pos) {
-        double realU = realSolve(x); // Точное решение в узле
-        plotAbsolutelyReal.push_back(make_pair(x, realU));           // Данные точного решения
-        x += 0.1; // Переход к следующему узлу
-    }
-
-    // Выводим наибольшую погрешность
-    cout << endl << "\033[4m" << "Ошибка не превышает " << maxError << "\033[0m" << "\n\n";
-
-    // Экспортируем данные в файлы
-    void export_data(
-                    const int size, 
-                    options_struct settings, 
-                    vector<pair<double, double>> plotMKE,
-                    vector<pair<double, double>> plotReal,
-                    vector<pair<double, double>> plotAbsolutelyReal,
-                    vector<double> displacements,
-                    vector<double> errors
-            );
-    export_data(size, settings, plotMKE, plotReal, plotAbsolutelyReal, displacements, errors);
-    exportStiffnessMatrixAndLoadVector(stiffnessMatrix, loadVector, size);
+    cout << endl;
 
     return 0;
 }
